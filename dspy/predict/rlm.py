@@ -162,7 +162,8 @@ class RLM(Module):
                    Allows using a different (e.g., cheaper) model for sub-queries.
             interpreter_factory: Zero-argument callable that creates an interpreter for each forward pass. The
                 callable may be invoked concurrently, and DSPy shuts down each interpreter it returns. RLM updates
-                the returned interpreter's mutable ``tools`` dictionary before execution.
+                the returned interpreter's mutable ``tools`` dictionary before execution. The callable may expose
+                an ``execution_instructions`` string describing its runtime for the action prompt.
         """
         super().__init__()
         _validate_interpreter_factory(interpreter_factory)
@@ -351,6 +352,13 @@ class RLM(Module):
         # Format tool documentation for user-provided tools
         tool_docs = self._format_tool_docs(self._user_tools)
 
+        code_desc = "Python code to execute. Use markdown code block format: ```python\\n<code>\\n```"
+        execution_instructions = getattr(self._interpreter_factory, "execution_instructions", "")
+        if not isinstance(execution_instructions, str):
+            raise TypeError("interpreter_factory.execution_instructions must be a string")
+        if execution_instructions:
+            code_desc += "\nExecution environment: " + execution_instructions
+
         action_sig = (
             dspy.Signature({}, task_instructions + ACTION_INSTRUCTIONS_TEMPLATE.format(
                 inputs=inputs_str, final_output_names=final_output_names, output_fields=output_fields,
@@ -360,7 +368,7 @@ class RLM(Module):
             .append("repl_history", dspy.InputField(desc="Previous REPL code executions and their outputs"), type_=REPLHistory)
             .append("iteration", dspy.InputField(desc="Current iteration number (1-indexed) out of max_iters"), type_=str)
             .append("reasoning", dspy.OutputField(desc="Think step-by-step: what do you know? What remains? Plan your next action."), type_=str)
-            .append("code", dspy.OutputField(desc="Python code to execute. Use markdown code block format: ```python\\n<code>\\n```"), type_=str)
+            .append("code", dspy.OutputField(desc=code_desc), type_=str)
         )
 
         # Extract signature: includes the original signature's output fields and task instructions.

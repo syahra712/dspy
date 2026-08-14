@@ -111,7 +111,7 @@ $20,000,000
 | `verbose` | `bool` | `False` | Log detailed execution info |
 | `tools` | `list[Union[Callable, dspy.Tool]]` | `None` | Additional tool functions callable from interpreter code |
 | `sub_lm` | `dspy.LM` | `None` | LM for sub-queries. Defaults to `dspy.settings.lm`. Use a cheaper model here. |
-| `interpreter_factory` | `Callable[[], CodeInterpreter]` | `PythonInterpreter` | Creates one interpreter per invocation. RLM shuts down each returned interpreter. |
+| `interpreter_factory` | `Callable[[], CodeInterpreter]` | `PythonInterpreter` | Creates one interpreter per invocation. RLM shuts down each returned interpreter. May expose an optional `execution_instructions` string for the action prompt. |
 
 ## Built-in Tools
 
@@ -200,6 +200,12 @@ rlm = dspy.RLM(
 ```
 
 RLM creates and shuts down one interpreter from this factory per invocation. It adds invocation-scoped tools to the returned interpreter's mutable `tools` dictionary, so remote sandboxes need a `CodeInterpreter` adapter that supports that protocol. To reuse a caller-owned interpreter, pass it as the first positional argument when calling the module: `rlm(interpreter, context=data, query=query)`. RLM updates its tools and output metadata but does not shut down or restore it. Reuse is supported only for sequential calls to the same RLM instance; use the factory path for concurrency.
+
+If the factory exposes an `execution_instructions` string, RLM adds it to the persistent description of the action
+predictor's `code` output field. DSPy adapters place field descriptions in the system prompt. Because the metadata
+is part of the field contract rather than the task instructions, optimizers such as GEPA can update the action
+instructions without rewriting the execution environment. Factory classes and configured callable provider objects
+can expose this metadata; anonymous factories without it continue to use the generic code description.
 
 ### Custom Sandbox-Serializable Inputs
 

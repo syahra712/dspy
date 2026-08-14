@@ -8,9 +8,11 @@ Test organization:
 
 import base64
 from contextlib import contextmanager
+from pathlib import Path
 
 import pytest
 
+from dspy.adapters.chat_adapter import ChatAdapter
 from dspy.adapters.types.tool import Tool
 from dspy.predict.rlm import RLM, _strip_code_fences
 from dspy.primitives.code_interpreter import CodeExecutionError, CodeInterpreterError, FinalOutput
@@ -426,6 +428,25 @@ class TestRLMInitialization:
 
 
 class TestRLMInterpreterLifecycle:
+    def test_execution_instructions_are_part_of_code_field(self):
+        class Factory(MockInterpreterFactory):
+            execution_instructions = "Use this runtime."
+
+        signature = RLM("query -> answer", interpreter_factory=Factory()).generate_action.signature
+        optimized = signature.with_instructions("Optimized instructions")
+
+        description = signature.output_fields["code"].json_schema_extra["desc"]
+        assert "Use this runtime." in description
+        assert optimized.output_fields["code"].json_schema_extra["desc"] == description
+
+    def test_python_interpreter_system_prompt_bytes(self):
+        signature = RLM("query -> answer", interpreter_factory=PythonInterpreter).generate_action.signature
+        prompt = ChatAdapter().format_system_message(signature).encode()
+        snapshot = Path(__file__).with_name("snapshots") / "rlm_python_interpreter_system_prompt.txt"
+
+        expected = snapshot.read_text().removesuffix("\n").replace("␠", " ").encode()
+        assert prompt == expected
+
     def test_interpreter_remains_available_as_signature_input(self):
         factory = MockInterpreterFactory(responses=[FinalOutput({"answer": "CPython"})])
         rlm = RLM("interpreter -> answer", max_iters=1, interpreter_factory=factory)
