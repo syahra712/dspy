@@ -330,7 +330,9 @@ class GEPA(Teleprompter):
               DSPy evaluates up to `candidate_threads` proposal candidates concurrently.
             - wandb_attach_existing, mlflow_attach_existing, tracking_key_prefix: GEPA 0.1.4 tracking controls.
 
-            `max_reflection_cost` is supported and counts uncached calls to the reflection LM during this run.
+            `max_reflection_cost` is supported and counts uncached calls through the `reflection_lm` instance
+            during this run. Use a separate LM instance for reflection; if the same instance also runs the task,
+            its task calls count toward this budget.
 
             Note: Parameters already handled by DSPy's GEPA class will be overridden by the direct parameters
             and should not be passed through gepa_kwargs.

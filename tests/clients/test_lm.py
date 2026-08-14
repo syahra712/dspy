@@ -950,6 +950,12 @@ def test_base_lm_cost_tracking_survives_serialization():
 
     assert loaded_lm.total_cost == 0.75
 
+    del lm._total_cost  # Simulate a pickle created before cost tracking existed.
+    legacy_lm = cloudpickle.loads(cloudpickle.dumps(lm))
+    legacy_lm._add_cost(0.25)
+
+    assert legacy_lm.total_cost == 0.25
+
 
 def test_dump_state():
     lm = dspy.LM(

@@ -221,6 +221,7 @@ class BaseLM:
 
     def __setstate__(self, state):
         self.__dict__.update(state)
+        self._total_cost = getattr(self, "_total_cost", 0.0)
         self._cost_lock = threading.Lock()
 
     def _get_initial_kwargs(self, *, temperature, max_tokens, **kwargs) -> dict[str, Any]:
