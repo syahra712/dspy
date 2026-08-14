@@ -635,14 +635,43 @@ def test_track_best_outputs_result_structure():
             assert isinstance(cand_idx, int)
 
 
-def test_gepa_rejects_unsupported_reflection_cost_budget():
-    with pytest.raises(ValueError, match="max_reflection_cost"):
+def test_gepa_reflection_cost_budget_requires_reflection_lm():
+    with pytest.raises(ValueError, match="reflection_lm"):
         dspy.GEPA(
             metric=simple_metric,
             max_metric_calls=1,
-            reflection_lm=DummyLM([]),
+            instruction_proposer=lambda **kwargs: {},
             gepa_kwargs={"max_reflection_cost": 1.0},
         )
+
+
+def test_gepa_scopes_reflection_cost_budget_to_compile(monkeypatch):
+    from types import SimpleNamespace
+
+    import gepa
+
+    captured = {}
+
+    def optimize(seed_candidate, **kwargs):
+        captured.update(kwargs)
+        return SimpleNamespace(best_candidate=seed_candidate)
+
+    monkeypatch.setattr(gepa, "optimize", optimize)
+    lm = DummyLM([])
+    lm._costs.append(2.0)
+    dspy.configure(lm=DummyLM([]))
+    dspy.GEPA(
+        metric=simple_metric,
+        max_metric_calls=1,
+        reflection_lm=lm,
+        gepa_kwargs={"max_reflection_cost": 1.0},
+    ).compile(
+        SimpleModule("input -> output"),
+        trainset=[Example(input="a", output="b").with_inputs("input")],
+    )
+
+    assert captured["reflection_lm"] is lm
+    assert captured["max_reflection_cost"] == 3.0
 
 
 def test_adapter_state_round_trips_rng():
@@ -654,3 +683,29 @@ def test_adapter_state_round_trips_rng():
     adapter.rng.random()
     adapter.set_adapter_state(state)
     assert adapter.rng.random() == expected
+
+
+def test_batch_evaluate_is_parallel_and_preserves_context():
+    from gepa import EvaluationBatch
+
+    from dspy.teleprompt.gepa.gepa_utils import DspyAdapter
+    from dspy.utils.callback_context import ACTIVE_CALL_ID
+
+    adapter = DspyAdapter(SimpleModule("input -> output"), simple_metric, {})
+    barrier = threading.Barrier(2)
+
+    def evaluate(batch, candidate, capture_traces=False):
+        barrier.wait(timeout=1)
+        assert capture_traces
+        return EvaluationBatch(outputs=[(candidate, dspy.settings.lm, ACTIVE_CALL_ID.get())], scores=[1.0])
+
+    adapter.evaluate = evaluate
+    lm = DummyLM([])
+    token = ACTIVE_CALL_ID.set("parent")
+    try:
+        with dspy.context(lm=lm):
+            results = adapter.batch_evaluate([("first", []), ("second", [])])
+    finally:
+        ACTIVE_CALL_ID.reset(token)
+
+    assert [result.outputs[0] for result in results] == [("first", lm, "parent"), ("second", lm, "parent")]

@@ -1,5 +1,7 @@
 import logging
 import random
+from concurrent.futures import ThreadPoolExecutor
+from contextvars import copy_context
 from typing import Any, Callable, Protocol, TypedDict
 
 from gepa import EvaluationBatch, GEPAAdapter
@@ -267,6 +269,14 @@ class DspyAdapter(GEPAAdapter[Example, TraceData, Prediction]):
             scores = [r[2] for r in res.results]
             scores = [s["score"] if hasattr(s, "score") else s for s in scores]
             return EvaluationBatch(outputs=outputs, scores=scores, trajectories=None)
+
+    def batch_evaluate(self, items):
+        def evaluate(item):
+            context, (candidate, batch) = item
+            return context.run(self.evaluate, batch, candidate, capture_traces=True)
+
+        with ThreadPoolExecutor(max_workers=min(len(items), 8) or 1) as executor:
+            return list(executor.map(evaluate, [(copy_context(), item) for item in items]))
 
     def get_adapter_state(self) -> dict[str, Any]:
         return {"rng_state": self.rng.getstate()}

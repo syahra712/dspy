@@ -639,10 +639,14 @@ def test_base_lm_legacy_bridge_records_typed_history_and_usage_once():
 def test_base_lm_typed_forward_contract_uses_lm_request():
     class CustomLM(dspy.BaseLM):
         forward_contract = "typed_lm"
+        calls = 0
 
         def forward(self, request):
             assert isinstance(request, dspy.LMRequest)
-            return dspy.LMResponse.from_text(f"model={request.model}; text={request.messages[0].text}")
+            self.calls += 1
+            return dspy.LMResponse.from_text(
+                f"model={request.model}; text={request.messages[0].text}", cost=0.25, cache_hit=self.calls > 1
+            )
 
     lm = CustomLM("custom-model")
 
@@ -651,6 +655,7 @@ def test_base_lm_typed_forward_contract_uses_lm_request():
         response = lm("Query")
     assert isinstance(response, dspy.LMResponse)
     assert response.text == "model=custom-model; text=Query"
+    assert lm.total_cost == 0.25
 
 
 def test_base_lm_typed_forward_contract_rejects_non_lm_response_at_call_time():
@@ -846,11 +851,13 @@ async def test_base_lm_async_explicit_lm_request_returns_lm_response():
 def test_base_lm_tracks_usage_for_custom_subclasses():
     class CustomLM(dspy.BaseLM):
         def forward(self, prompt=None, messages=None, **kwargs):
-            return ModelResponse(
+            response = ModelResponse(
                 choices=[Choices(message=Message(role="assistant", content="Hi!"))],
                 usage={"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
                 model="custom-model",
             )
+            response._hidden_params["response_cost"] = 0.5
+            return response
 
     lm = CustomLM(model="custom-model")
 
@@ -861,6 +868,7 @@ def test_base_lm_tracks_usage_for_custom_subclasses():
     assert total_usage["prompt_tokens"] == 1
     assert total_usage["completion_tokens"] == 1
     assert total_usage["total_tokens"] == 2
+    assert lm.total_cost == 0.5
 
 
 def test_base_lm_copy_is_shallow_runtime_copy_with_isolated_dspy_state():

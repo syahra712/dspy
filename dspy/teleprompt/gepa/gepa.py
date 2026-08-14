@@ -325,11 +325,10 @@ class GEPA(Teleprompter):
             - mlflow_tracking_uri: The tracking URI to use for MLflow (when use_mlflow=True).
             - mlflow_experiment_name: The experiment name to use for MLflow (when use_mlflow=True).
             - sampling_strategy, selection_strategy, acceptance_criterion: GEPA 0.1.4 proposal controls.
-              DSPy supports these using GEPA's sequential candidate-evaluation fallback.
+              DSPy evaluates up to eight proposal candidates concurrently.
             - wandb_attach_existing, mlflow_attach_existing, tracking_key_prefix: GEPA 0.1.4 tracking controls.
 
-            `max_reflection_cost` is not supported yet because DSPy LMs do not expose the cumulative cost
-            interface GEPA requires. Passing it raises an error instead of silently ignoring the budget.
+            `max_reflection_cost` is supported and counts uncached calls to the reflection LM during this run.
 
             Note: Parameters already handled by DSPy's GEPA class will be overridden by the direct parameters
             and should not be passed through gepa_kwargs.
@@ -457,8 +456,8 @@ class GEPA(Teleprompter):
         self.component_selector = component_selector
         self.gepa_kwargs = gepa_kwargs or {}
 
-        if "max_reflection_cost" in self.gepa_kwargs:
-            raise ValueError("max_reflection_cost is not supported by dspy.GEPA yet.")
+        if self.gepa_kwargs.get("max_reflection_cost") is not None and reflection_lm is None:
+            raise ValueError("max_reflection_cost requires reflection_lm to be set.")
 
         if "reflection_prompt_template" in self.gepa_kwargs:
             raise ValueError(
@@ -609,13 +608,17 @@ class GEPA(Teleprompter):
         for path, flex in flex_submodules.items():
             seed_candidate[path] = flex.module_src
 
+        gepa_kwargs = self.gepa_kwargs.copy()
+        if gepa_kwargs.get("max_reflection_cost") is not None:
+            gepa_kwargs["max_reflection_cost"] += self.reflection_lm.total_cost
+
         gepa_result: GEPAResult = optimize(
             seed_candidate=seed_candidate,
             trainset=trainset,
             valset=valset,
             adapter=adapter,
             # Reflection-based configuration
-            reflection_lm=(lambda x: adapter.stripped_lm_call(x)[0]) if self.reflection_lm is not None else None,
+            reflection_lm=self.reflection_lm,
             candidate_selection_strategy=self.candidate_selection_strategy,
             skip_perfect_score=self.skip_perfect_score,
             reflection_minibatch_size=self.reflection_minibatch_size,
@@ -638,7 +641,7 @@ class GEPA(Teleprompter):
             raise_on_exception=True,
             # Reproducibility
             seed=self.seed,
-            **self.gepa_kwargs,
+            **gepa_kwargs,
         )
 
         new_prog = adapter.build_program(gepa_result.best_candidate)
