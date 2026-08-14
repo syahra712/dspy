@@ -93,6 +93,7 @@ class DspyAdapter(GEPAAdapter[Example, TraceData, Prediction]):
         feedback_map: dict[str, Callable],
         failure_score=0.0,
         num_threads: int | None = None,
+        candidate_threads: int = 8,
         add_format_failure_as_feedback: bool = False,
         rng: random.Random | None = None,
         reflection_lm=None,
@@ -105,6 +106,7 @@ class DspyAdapter(GEPAAdapter[Example, TraceData, Prediction]):
         self.feedback_map = feedback_map
         self.failure_score = failure_score
         self.num_threads = num_threads
+        self.candidate_threads = candidate_threads
         self.add_format_failure_as_feedback = add_format_failure_as_feedback
         self.rng = rng or random.Random(0)
         self.reflection_lm = reflection_lm
@@ -270,12 +272,12 @@ class DspyAdapter(GEPAAdapter[Example, TraceData, Prediction]):
             scores = [s["score"] if hasattr(s, "score") else s for s in scores]
             return EvaluationBatch(outputs=outputs, scores=scores, trajectories=None)
 
-    def batch_evaluate(self, items):
+    def batch_evaluate(self, items, *, capture_traces=True):
         def evaluate(item):
             context, (candidate, batch) = item
-            return context.run(self.evaluate, batch, candidate, capture_traces=True)
+            return context.run(self.evaluate, batch, candidate, capture_traces=capture_traces)
 
-        with ThreadPoolExecutor(max_workers=min(len(items), 8) or 1) as executor:
+        with ThreadPoolExecutor(max_workers=min(len(items), self.candidate_threads) or 1) as executor:
             return list(executor.map(evaluate, [(copy_context(), item) for item in items]))
 
     def get_adapter_state(self) -> dict[str, Any]:

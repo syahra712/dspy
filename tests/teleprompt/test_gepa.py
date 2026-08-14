@@ -665,7 +665,7 @@ def test_gepa_scopes_reflection_cost_budget_to_compile(monkeypatch):
 
     monkeypatch.setattr(gepa, "optimize", optimize)
     lm = DummyLM([])
-    lm.total_cost = 2.0
+    lm._total_cost = 2.0
     dspy.configure(lm=DummyLM([]))
     dspy.GEPA(
         metric=simple_metric,
@@ -698,12 +698,14 @@ def test_batch_evaluate_is_parallel_and_preserves_context():
     from dspy.teleprompt.gepa.gepa_utils import DspyAdapter
     from dspy.utils.callback_context import ACTIVE_CALL_ID
 
-    adapter = DspyAdapter(SimpleModule("input -> output"), simple_metric, {})
+    adapter = DspyAdapter(SimpleModule("input -> output"), simple_metric, {}, candidate_threads=2)
     barrier = threading.Barrier(2)
+    trace_modes = []
 
     def evaluate(batch, candidate, capture_traces=False):
-        barrier.wait(timeout=1)
-        assert capture_traces
+        if capture_traces:
+            barrier.wait(timeout=1)
+        trace_modes.append(capture_traces)
         return EvaluationBatch(outputs=[(candidate, dspy.settings.lm, ACTIVE_CALL_ID.get())], scores=[1.0])
 
     adapter.evaluate = evaluate
@@ -716,3 +718,6 @@ def test_batch_evaluate_is_parallel_and_preserves_context():
         ACTIVE_CALL_ID.reset(token)
 
     assert [result.outputs[0] for result in results] == [("first", lm, "parent"), ("second", lm, "parent")]
+
+    adapter.batch_evaluate([("first", [])], capture_traces=False)
+    assert trace_modes == [True, True, False]

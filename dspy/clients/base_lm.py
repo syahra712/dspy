@@ -2,6 +2,7 @@ import copy as copy_module
 import datetime
 import importlib
 import inspect
+import threading
 import uuid
 import warnings
 from typing import Any, Literal, TextIO
@@ -200,8 +201,18 @@ class BaseLM:
         self.num_retries = num_retries
         self.kwargs = self._get_initial_kwargs(temperature=temperature, max_tokens=max_tokens, **kwargs)
         self.history = []
-        self.total_cost = 0.0
+        self._total_cost = 0.0
+        self._cost_lock = threading.Lock()
         self._warned_zero_temp_rollout = False
+
+    @property
+    def total_cost(self) -> float:
+        with self._cost_lock:
+            return self._total_cost
+
+    def _add_cost(self, cost: float | None) -> None:
+        with self._cost_lock:
+            self._total_cost += cost or 0.0
 
     def _get_initial_kwargs(self, *, temperature, max_tokens, **kwargs) -> dict[str, Any]:
         return dict(temperature=temperature, max_tokens=max_tokens, **kwargs)
@@ -446,7 +457,7 @@ class BaseLM:
                 "Set forward_contract='typed_lm' or pass an LMRequest/use dspy.context(experimental=True)."
             )
         if not getattr(response, "cache_hit", False):
-            self.total_cost += getattr(response, "_hidden_params", {}).get("response_cost") or 0.0
+            self._add_cost(getattr(response, "_hidden_params", {}).get("response_cost"))
         return self._process_lm_response(response, prompt, messages, **kwargs)
 
     async def _legacy_acall_direct(
@@ -465,7 +476,7 @@ class BaseLM:
                 "Set forward_contract='typed_lm' or pass an LMRequest/use dspy.context(experimental=True)."
             )
         if not getattr(response, "cache_hit", False):
-            self.total_cost += getattr(response, "_hidden_params", {}).get("response_cost") or 0.0
+            self._add_cost(getattr(response, "_hidden_params", {}).get("response_cost"))
         return self._process_lm_response(response, prompt, messages, **kwargs)
 
     def _legacy_prompt_from_items(self, items: tuple[Any, ...], *, prompt: str | None) -> str | None:
@@ -593,7 +604,7 @@ class BaseLM:
     def _finalize_lm_response(self, request: LMRequest, response: LMResponse) -> LMResponse:
         """Record usage and typed history for a normalized LM response."""
         if not getattr(response, "cache_hit", False):
-            self.total_cost += response.cost or 0.0
+            self._add_cost(response.cost)
         if not getattr(response, "cache_hit", False) and settings.usage_tracker:
             usage = response.usage_as_dict()
             if usage:
@@ -761,7 +772,8 @@ class BaseLM:
 
         new_instance = copy_module.copy(self)
         new_instance.history = []
-        new_instance.total_cost = 0.0
+        new_instance._total_cost = 0.0
+        new_instance._cost_lock = threading.Lock()
         new_instance.callbacks = list(getattr(self, "callbacks", []) or [])
         new_instance.kwargs = dict(getattr(self, "kwargs", {}) or {})
 
