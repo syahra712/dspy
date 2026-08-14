@@ -658,7 +658,7 @@ def test_gepa_scopes_reflection_cost_budget_to_compile(monkeypatch):
 
     monkeypatch.setattr(gepa, "optimize", optimize)
     lm = DummyLM([])
-    lm._costs.append(2.0)
+    lm.total_cost = 2.0
     dspy.configure(lm=DummyLM([]))
     dspy.GEPA(
         metric=simple_metric,
