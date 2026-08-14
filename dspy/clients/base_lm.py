@@ -297,8 +297,6 @@ class BaseLM:
         else:
             outputs = self._process_completion(response, merged_kwargs)
 
-        if not getattr(response, "cache_hit", False):
-            self._costs.append(getattr(response, "_hidden_params", {}).get("response_cost") or 0.0)
         if not getattr(response, "cache_hit", False) and settings.usage_tracker:
             settings.usage_tracker.add_usage(self.model, dict(getattr(response, "usage", {}) or {}))
 
@@ -452,6 +450,8 @@ class BaseLM:
                 f"{type(self).__name__}.forward() returned dspy.LMResponse on the legacy direct path. "
                 "Set forward_contract='typed_lm' or pass an LMRequest/use dspy.context(experimental=True)."
             )
+        if not getattr(response, "cache_hit", False):
+            self._costs.append(getattr(response, "_hidden_params", {}).get("response_cost") or 0.0)
         return self._process_lm_response(response, prompt, messages, **kwargs)
 
     async def _legacy_acall_direct(
@@ -469,6 +469,8 @@ class BaseLM:
                 f"{type(self).__name__}.aforward() returned dspy.LMResponse on the legacy direct path. "
                 "Set forward_contract='typed_lm' or pass an LMRequest/use dspy.context(experimental=True)."
             )
+        if not getattr(response, "cache_hit", False):
+            self._costs.append(getattr(response, "_hidden_params", {}).get("response_cost") or 0.0)
         return self._process_lm_response(response, prompt, messages, **kwargs)
 
     def _legacy_prompt_from_items(self, items: tuple[Any, ...], *, prompt: str | None) -> str | None:

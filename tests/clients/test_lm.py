@@ -613,11 +613,13 @@ def test_base_lm_explicit_lm_request_returns_lm_response_without_experimental():
 def test_base_lm_legacy_bridge_records_typed_history_and_usage_once():
     class CustomLM(dspy.BaseLM):
         def forward(self, prompt=None, messages=None, **kwargs):
-            return ModelResponse(
+            response = ModelResponse(
                 choices=[Choices(message=Message(role="assistant", content="Hi!"))],
                 usage={"prompt_tokens": 1, "completion_tokens": 2, "total_tokens": 3},
                 model="custom-model",
             )
+            response._hidden_params["response_cost"] = 0.5
+            return response
 
     lm = CustomLM("custom-model")
     request = dspy.LMRequest.from_call(model="custom-model", prompt="Query")
@@ -634,6 +636,7 @@ def test_base_lm_legacy_bridge_records_typed_history_and_usage_once():
     assert total_usage["prompt_tokens"] == 1
     assert total_usage["completion_tokens"] == 2
     assert total_usage["total_tokens"] == 3
+    assert lm.total_cost == 0.5
 
 
 def test_base_lm_typed_forward_contract_uses_lm_request():
@@ -835,33 +838,42 @@ def test_base_lm_experimental_direct_messages_can_reuse_lm_response_as_assistant
 async def test_base_lm_async_explicit_lm_request_returns_lm_response():
     class CustomLM(dspy.BaseLM):
         async def aforward(self, prompt=None, messages=None, **kwargs):
-            return ModelResponse(
+            response = ModelResponse(
                 choices=[Choices(message=Message(role="assistant", content="Hi async!"))],
                 usage={},
                 model="custom-model",
             )
+            response._hidden_params["response_cost"] = 0.5
+            return response
 
     request = dspy.LMRequest.from_call(model="custom-model", prompt="Query")
-    response = await CustomLM("custom-model").acall(request)
+    lm = CustomLM("custom-model")
+    response = await lm.acall(request)
 
     assert isinstance(response, dspy.LMResponse)
     assert response.text == "Hi async!"
+    assert lm.total_cost == 0.5
 
 
 def test_base_lm_tracks_usage_for_custom_subclasses():
     class CustomLM(dspy.BaseLM):
+        calls = 0
+
         def forward(self, prompt=None, messages=None, **kwargs):
+            self.calls += 1
             response = ModelResponse(
                 choices=[Choices(message=Message(role="assistant", content="Hi!"))],
                 usage={"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
                 model="custom-model",
             )
             response._hidden_params["response_cost"] = 0.5
+            response.cache_hit = self.calls > 1
             return response
 
     lm = CustomLM(model="custom-model")
 
     with track_usage() as usage_tracker:
+        lm("Query")
         lm("Query")
 
     total_usage = usage_tracker.get_total_tokens()["custom-model"]
