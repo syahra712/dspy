@@ -481,11 +481,16 @@ class TestRLMInterpreterLifecycle:
     @pytest.mark.asyncio
     async def test_caller_owned_interpreter_can_be_reused_across_sequential_calls(self):
         factory = MockInterpreterFactory()
+
+        def backend_tool():
+            return "backend"
+
         interpreter = MockInterpreter(
             responses=[
                 FinalOutput({"answer": "first"}),
                 FinalOutput({"answer": "second"}),
-            ]
+            ],
+            tools={"backend_tool": backend_tool},
         )
         rlm = RLM("query -> answer", max_iters=1, interpreter_factory=factory)
         rlm.generate_action = make_mock_predictor([
@@ -499,6 +504,7 @@ class TestRLMInterpreterLifecycle:
             assert sync_result.answer == "first"
             assert async_result.answer == "second"
             assert factory.instances == []
+            assert interpreter.tools == {"backend_tool": backend_tool}
             assert interpreter.execute("print('still open')") == ""
         finally:
             interpreter.shutdown()
