@@ -214,6 +214,15 @@ class BaseLM:
         with self._cost_lock:
             self._total_cost += cost or 0.0
 
+    def __getstate__(self):
+        state = self.__dict__.copy()
+        state.pop("_cost_lock", None)
+        return state
+
+    def __setstate__(self, state):
+        self.__dict__.update(state)
+        self._cost_lock = threading.Lock()
+
     def _get_initial_kwargs(self, *, temperature, max_tokens, **kwargs) -> dict[str, Any]:
         return dict(temperature=temperature, max_tokens=max_tokens, **kwargs)
 

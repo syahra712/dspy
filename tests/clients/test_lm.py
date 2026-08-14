@@ -1,10 +1,14 @@
 import json
 import tempfile
+import threading
+import time
 import warnings
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from unittest import mock
 from unittest.mock import patch
 
+import cloudpickle
 import litellm
 import pydantic
 import pytest
@@ -883,6 +887,32 @@ def test_base_lm_tracks_usage_for_custom_subclasses():
     assert lm.total_cost == 0.5
 
 
+def test_base_lm_tracks_cost_across_concurrent_calls():
+    calls = 8
+    barrier = threading.Barrier(calls)
+
+    class SlowFloat(float):
+        def __add__(self, other):
+            time.sleep(0.01)
+            return SlowFloat(super().__add__(other))
+
+    class CustomLM(dspy.BaseLM):
+        forward_contract = "typed_lm"
+
+        def forward(self, request):
+            barrier.wait()
+            return dspy.LMResponse.from_text("done", cost=1.0)
+
+    lm = CustomLM("custom-model")
+    lm._total_cost = SlowFloat(0.0)
+    request = dspy.LMRequest.from_call(model="custom-model", prompt="Query")
+
+    with ThreadPoolExecutor(max_workers=calls) as executor:
+        list(executor.map(lm, [request] * calls))
+
+    assert lm.total_cost == calls
+
+
 def test_base_lm_copy_is_shallow_runtime_copy_with_isolated_dspy_state():
     class CustomLM(dspy.BaseLM):
         pass
@@ -893,6 +923,7 @@ def test_base_lm_copy_is_shallow_runtime_copy_with_isolated_dspy_state():
     lm.client = client
     lm.extra_state = {"mutable": []}
     lm.history = [{"prompt": "original"}]
+    lm._add_cost(0.5)
 
     copied_lm = lm.copy(temperature=0.2, rollout_id=1)
 
@@ -905,6 +936,19 @@ def test_base_lm_copy_is_shallow_runtime_copy_with_isolated_dspy_state():
     assert copied_lm.callbacks is not lm.callbacks
     assert copied_lm.kwargs == {"temperature": 0.2, "max_tokens": None, "rollout_id": 1}
     assert lm.kwargs == {"temperature": 0.1, "max_tokens": None}
+    assert copied_lm.total_cost == 0.0
+    assert lm.total_cost == 0.5
+    assert copied_lm._cost_lock is not lm._cost_lock
+
+
+def test_base_lm_cost_tracking_survives_serialization():
+    lm = dspy.LM("openai/gpt-4o")
+    lm._add_cost(0.5)
+
+    loaded_lm = cloudpickle.loads(cloudpickle.dumps(lm))
+    loaded_lm._add_cost(0.25)
+
+    assert loaded_lm.total_cost == 0.75
 
 
 def test_dump_state():
