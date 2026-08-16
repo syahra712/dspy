@@ -16,6 +16,7 @@ import logging
 import math
 import os
 import re
+import secrets
 import shutil
 import subprocess
 import threading
@@ -73,6 +74,11 @@ def _canonicalize_path(path: PathLike | str) -> str:
     realpath'd or reads through a symlink (including DENO_DIR) are denied.
     """
     return os.path.realpath(os.path.expanduser(os.fspath(path)))
+
+
+def _paths_overlap(first: str, second: str) -> bool:
+    first, second = (os.path.normcase(path).rstrip(os.sep) for path in (first, second))
+    return first == second or first.startswith(second + os.sep) or second.startswith(first + os.sep)
 
 
 def _find_deno_executable() -> str:
@@ -267,6 +273,14 @@ class PythonInterpreter:
 
         self.enable_read_paths = enable_read_paths or []
         self.enable_write_paths = enable_write_paths or []
+        mounts = {}
+        for path in [*self.enable_read_paths, *self.enable_write_paths]:
+            if path:
+                virtual_path = os.path.basename(os.fspath(path))
+                host_path = _canonicalize_path(path)
+                if virtual_path in mounts and mounts[virtual_path] != host_path:
+                    raise CodeInterpreterError("Mounted files must have unique basenames inside the sandbox.")
+                mounts[virtual_path] = host_path
         self.enable_env_vars = enable_env_vars or []
         self.enable_network_access = enable_network_access or []
         self.sync_files = sync_files
@@ -291,6 +305,9 @@ class PythonInterpreter:
 
             # Also allow reading Deno's cache directory so Pyodide can load its files
             deno_dir = self._get_deno_dir(deno_executable)
+            protected = [_canonicalize_path(self._get_runner_path()), *([_canonicalize_path(deno_dir)] if deno_dir else [])]
+            if any(_paths_overlap(_canonicalize_path(path), item) for path in self.enable_write_paths for item in protected):
+                raise CodeInterpreterError("Write paths cannot overlap PythonInterpreter runtime files.")
             raw_read_paths = [
                 self._get_runner_path(),
                 *([deno_dir] if deno_dir else []),
@@ -312,16 +329,17 @@ class PythonInterpreter:
 
             args.append(_canonicalize_path(self._get_runner_path()))
 
-            # For runner.js to load in env vars
-            if self._env_arg:
-                args.append(self._env_arg)
+            # For runner.js to load in env vars and revoke cache access after startup
+            args.append(self._env_arg)
+            if deno_dir:
+                args.append(f"--dspy-deno-dir={_canonicalize_path(deno_dir)}")
             self.deno_command = args
 
         self.deno_process = None
         self._mounted_files = False
-        self._request_id = 0
         self._last_diagnostic: str | None = None
         self._owner_thread: int | None = None
+        self._handling_tool_call = False
         self._pending_large_vars = {}
         self._session_ended = False
 
@@ -486,7 +504,11 @@ class PythonInterpreter:
         kwargs = params.get("kwargs", {})
 
         try:
-            result = self.invoke_tool(tool_name, kwargs)
+            self._handling_tool_call = True
+            try:
+                result = self.invoke_tool(tool_name, kwargs)
+            finally:
+                self._handling_tool_call = False
             result = _make_jsonable(result)
             if result is None or isinstance(result, str):
                 response = _jsonrpc_result({"value": str(result) if result is not None else "", "type": "string"}, request_id)
@@ -577,10 +599,9 @@ class PythonInterpreter:
             logger.debug("Skipping malformed JSON during %s: %s", context, response_line[:100])
             return None
 
-    def _next_request_id(self) -> int:
-        self._request_id += 1
+    def _next_request_id(self) -> str:
         self._last_diagnostic = None
-        return self._request_id
+        return secrets.token_hex(16)
 
     def _handle_out_of_band_message(self, msg: dict, context: str) -> bool:
         """Consume a message that is not a response to any request (a notification
@@ -743,6 +764,8 @@ class PythonInterpreter:
         code: str,
         variables: dict[str, Any] | None = None,
     ) -> Any:
+        if self._handling_tool_call:
+            raise CodeInterpreterError("PythonInterpreter cannot execute recursively from one of its tools.")
         self._check_session_active()
         self._check_thread_ownership()
         variables = variables or {}
