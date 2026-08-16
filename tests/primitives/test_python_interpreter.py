@@ -269,6 +269,40 @@ except Exception as e:
         assert secret_content in output
 
 
+def test_default_runner_cannot_read_shared_deno_cache(monkeypatch, tmp_path):
+    shared_cache = tmp_path / "deno"
+    shared_cache.mkdir()
+    canary = shared_cache / "secret.txt"
+    canary.write_text("shared cache secret")
+    monkeypatch.setenv("DENO_DIR", str(shared_cache))
+
+    with PythonInterpreter() as interpreter:
+        result = interpreter.execute(
+            f"""import js
+try:
+    js.Deno.readTextFileSync({str(canary)!r})
+    result = "disclosed"
+except Exception as error:
+    result = str(error)
+result"""
+        )
+
+    assert "disclosed" not in result
+    assert "read access" in result.lower()
+
+
+def test_default_runner_starts_offline_from_warm_shared_cache(monkeypatch, tmp_path):
+    shared_cache = tmp_path / "deno"
+    runner = str(Path(python_interpreter.__file__).with_name("runner.js"))
+    env = {**_deno_subprocess_env(), "DENO_DIR": str(shared_cache)}
+    subprocess.run([_find_deno_executable(), "cache", "--no-config", "--no-lock", runner], env=env, check=True)
+    monkeypatch.setenv("DENO_DIR", str(shared_cache))
+
+    with PythonInterpreter() as interpreter:
+        interpreter.deno_command.insert(interpreter.deno_command.index(os.path.realpath(runner)), "--cached-only")
+        assert interpreter.execute("1 + 1") == 2
+
+
 def test_tools_dict_is_copied():
     """Test that tools dict is defensively copied, not stored by reference."""
     tools = {"my_tool": lambda: "result"}
@@ -413,6 +447,34 @@ def test_custom_deno_command_is_unchanged():
     assert interpreter.deno_command is not command
 
 
+def test_rejects_mounts_with_the_same_guest_basename(tmp_path):
+    first = tmp_path / "first" / "shared.txt"
+    second = tmp_path / "second" / "shared.txt"
+    first.parent.mkdir()
+    second.parent.mkdir()
+
+    with pytest.raises(CodeInterpreterError, match="unique basenames"):
+        PythonInterpreter(deno_command=["deno"], enable_read_paths=[first], enable_write_paths=[second])
+
+
+def test_allows_same_canonical_file_as_read_and_write_mount(tmp_path):
+    path = tmp_path / "shared.txt"
+
+    PythonInterpreter(deno_command=["deno"], enable_read_paths=[path], enable_write_paths=[path])
+
+
+def test_rejects_alias_basename_colliding_with_another_file(tmp_path):
+    first = tmp_path / "first.txt"
+    second = tmp_path / "second" / "shared.txt"
+    alias = tmp_path / "alias" / "shared.txt"
+    second.parent.mkdir()
+    alias.parent.mkdir()
+    alias.symlink_to(first)
+
+    with pytest.raises(CodeInterpreterError, match="unique basenames"):
+        PythonInterpreter(deno_command=["deno"], enable_read_paths=[first, alias, second])
+
+
 def test_custom_deno_command_preserves_environment(monkeypatch):
     monkeypatch.setenv("DENO_NO_PACKAGE_JSON", "0")
     captured = {}
@@ -494,6 +556,23 @@ def test_default_command_uses_managed_deno_for_info_and_run(monkeypatch, tmp_pat
     interpreter._spawn_process()
 
     assert seen_operations == [("info", deno_executable), ("version", deno_executable)]
+
+
+def test_default_command_revokes_shared_cache_after_startup(monkeypatch, tmp_path):
+    shared_cache = tmp_path / "deno"
+    monkeypatch.setattr(PythonInterpreter, "_get_deno_dir", staticmethod(lambda executable: str(shared_cache)))
+    interpreter = PythonInterpreter()
+
+    assert str(shared_cache) in next(arg for arg in interpreter.deno_command if arg.startswith("--allow-read="))
+    assert f"--dspy-deno-dir={shared_cache}" in interpreter.deno_command
+
+
+def test_rejects_write_paths_overlapping_runtime_files(monkeypatch, tmp_path):
+    cache = tmp_path / "deno"
+    monkeypatch.setattr(PythonInterpreter, "_get_deno_dir", staticmethod(lambda executable: str(cache)))
+
+    with pytest.raises(CodeInterpreterError, match="runtime files"):
+        PythonInterpreter(enable_write_paths=[cache])
 
 
 @pytest.mark.parametrize("version", [(2, 0, 0), (2, 4, 5), (2, 9, 5)])
@@ -641,6 +720,26 @@ def test_tool_with_typed_signature(configure_pooled_interpreter):
     assert result == "searched 'test' with limit 5"
 
 
+def test_tool_none_type_and_nested_json_default():
+    def tool(value: type(None) = None, items: list = [None]):  # noqa: B006
+        return [value, items]
+
+    with PythonInterpreter(tools={"tool": tool}) as interpreter:
+        assert interpreter.execute("tool()") == [None, [None]]
+
+
+@pytest.mark.parametrize(
+    ("field", "code", "expected"),
+    [
+        ({"name": "nothing", "type": "NoneType"}, "SUBMIT(nothing=None)", {"nothing": None}),
+        ({"name": "FinalOutput", "type": "str"}, "SUBMIT(FinalOutput='ok')", {"FinalOutput": "ok"}),
+    ],
+)
+def test_submit_valid_runtime_edge_cases(field, code, expected):
+    with PythonInterpreter(output_fields=[field]) as interpreter:
+        assert interpreter.execute(code) == FinalOutput(expected)
+
+
 def test_tool_positional_args(configure_pooled_interpreter):
     """Test that tools work with positional arguments."""
 
@@ -717,6 +816,51 @@ def test_protocol_failure_ends_session(monkeypatch):
 
         with pytest.raises(CodeInterpreterError, match="session has ended"):
             interpreter.execute("2 + 2")
+
+
+def test_request_ids_are_128_bit_random_values():
+    interpreter = PythonInterpreter(deno_command=["deno"])
+    request_ids = {interpreter._next_request_id() for _ in range(100)}
+
+    assert len(request_ids) == 100
+    assert all(len(request_id) == 32 and int(request_id, 16) >= 0 for request_id in request_ids)
+
+
+def test_guest_prototype_hook_cannot_redirect_tool_wrapper():
+    calls = []
+
+    def benign():
+        calls.append("benign")
+        return "safe"
+
+    def danger():
+        calls.append("danger")
+        return "unsafe"
+
+    with PythonInterpreter(tools={"benign": benign, "danger": danger}) as interpreter:
+        result = interpreter.execute(
+            "import js\n"
+            "js.eval('Object.prototype.toJSON = function() { "
+            'if (Object.hasOwn(this, "name")) return {name: "danger", kwargs: {}}; '
+            "return this; }')\n"
+            "benign()"
+        )
+
+    assert result == "safe"
+    assert calls == ["benign"]
+
+
+def test_tool_cannot_reenter_same_interpreter():
+    holder = {}
+
+    def nested_execute():
+        return holder["interpreter"].execute("'nested'")
+
+    with PythonInterpreter(tools={"nested_execute": nested_execute}) as interpreter:
+        holder["interpreter"] = interpreter
+        with pytest.raises(CodeExecutionError, match="cannot execute recursively"):
+            interpreter.execute("nested_execute()")
+        assert interpreter.execute("40 + 2") == 42
 
 
 def test_failed_health_check_ends_session(monkeypatch):
@@ -1445,9 +1589,11 @@ def test_id_less_protocol_errors_are_terminal():
         interpreter._handle_out_of_band_message(parse_error, "during test")
 
 
-def test_unsolicited_error_line_is_not_consumed_as_the_response():
+def test_unsolicited_error_line_is_not_consumed_as_the_response(monkeypatch):
     """#10165: an id-less async error arriving ahead of the real response (the
     wire trace an unhandled rejection produces) must not be mistaken for it."""
+    request_id = "a" * 32
+    monkeypatch.setattr(python_interpreter.secrets, "token_hex", lambda _: request_id)
 
     class FakeDeno:
         def __init__(self, lines):
@@ -1461,7 +1607,7 @@ def test_unsolicited_error_line_is_not_consumed_as_the_response():
     interpreter = PythonInterpreter()
     interpreter.deno_process = FakeDeno([
         json.dumps({"jsonrpc": "2.0", "error": {"code": -32007, "message": "Unhandled async error: PythonError"}, "id": None}),
-        json.dumps({"jsonrpc": "2.0", "result": {"output": "ok\n"}, "id": 1}),
+        json.dumps({"jsonrpc": "2.0", "result": {"output": "ok\n"}, "id": request_id}),
     ])
     assert interpreter.execute("print('ok')") == "ok\n"
 
